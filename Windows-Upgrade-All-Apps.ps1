@@ -161,20 +161,352 @@ function Get-FileUri {
     try { return ([Uri]$Path).AbsoluteUri } catch { return $Path }
 }
 
-# Copy local PackagesViewer.html into output folder for easy access
+# Copy or create PackagesViewer.html into output folder for easy access
 $viewerDst = $null
 try {
     $scriptRoot = $PSScriptRoot
     if (-not $scriptRoot) { $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
     if (-not $scriptRoot) { $scriptRoot = $PWD.Path }
     $viewerSrc = Join-Path $scriptRoot 'Quick Start\Tools\PackagesViewer.html'
+    $viewerDst = Join-Path $outDir 'PackagesViewer.html'
+    
     if (Test-Path -LiteralPath $viewerSrc) {
-        $viewerDst = Join-Path $outDir 'PackagesViewer.html'
         Copy-Item -LiteralPath $viewerSrc -Destination $viewerDst -Force -ErrorAction Stop
         Write-Host "[viewer] Copied PackagesViewer.html to $viewerDst"
+    } else {
+        # Create embedded viewer if source not found
+        Write-Host "[viewer] PackagesViewer.html not found, creating embedded version..."
+        $viewerHtml = @'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Windows Upgrade Packages Viewer</title>
+  <style>
+    :root { --bg:#0f172a; --muted:#334155; --fg:#e2e8f0; --accent:#22d3ee; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
+    html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    header { padding:16px 20px; border-bottom:1px solid var(--muted); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    h1 { font-size:18px; margin:0 14px 0 0; }
+    .card { margin:16px 20px; padding:16px; border:1px solid var(--muted); border-radius:10px; background:#111827; }
+    .row { display:flex; gap:16px; flex-wrap:wrap; }
+    .col { flex:1 1 360px; }
+    .files label { display:block; margin:8px 0 6px; color:#cbd5e1; }
+    input[type="file"] { background:#0b1220; border:1px solid var(--muted); color:#93c5fd; padding:8px; border-radius:8px; width:100%; }
+    .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+    .btn { background:var(--muted); color:var(--fg); border:0; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    .btn.primary { background:var(--accent); color:#001015; font-weight:600; }
+    .btn:disabled { opacity:0.5; cursor:not-allowed; }
+    .search { flex:1 1 240px; }
+    .search input { width:100%; padding:8px 10px; border:1px solid var(--muted); border-radius:8px; background:#0b1220; color:var(--fg); }
+    .summary { display:flex; gap:16px; flex-wrap:wrap; }
+    .pill { padding:6px 10px; border-radius:999px; background:#0b1220; border:1px solid var(--muted); color:#cbd5e1; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { padding:8px 10px; border-bottom:1px solid #1f2937; }
+    th { text-align:left; color:#cbd5e1; cursor:pointer; position:relative; }
+    th .dir { position:absolute; right:6px; top:50%; transform:translateY(-50%); opacity:0.6; }
+    tr:hover { background:#0b1220; }
+    .tag { padding:3px 8px; border-radius:999px; font-size:12px; border:1px solid var(--muted); }
+    .tag.add { background:#052e1b; color:#86efac; border-color:#166534; }
+    .tag.remove { background:#3a0a0a; color:#fecaca; border-color:#991b1b; }
+    .tag.update { background:#052433; color:#a5f3fc; border-color:#155e75; }
+    footer { padding:16px 20px; color:#94a3b8; border-top:1px solid var(--muted); }
+    code { background:#0b1220; padding:2px 6px; border-radius:6px; border:1px solid var(--muted); }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Windows Upgrade Packages Viewer</h1>
+    <div class="pill">Load the JSON snapshots exported by your script (Before/After).</div>
+  </header>
+  <div class="card files">
+    <div class="row">
+      <div class="col">
+        <label for="beforeFile">Before JSON (Windows-Upgrade-Packages-Before_*.json)</label>
+        <input type="file" id="beforeFile" accept="application/json,.json" />
+      </div>
+      <div class="col">
+        <label for="afterFile">After JSON (Windows-Upgrade-Packages_*.json)</label>
+        <input type="file" id="afterFile" accept="application/json,.json" />
+      </div>
+    </div>
+    <div class="controls">
+      <button class="btn primary" id="parseBtn" disabled>Parse selected files</button>
+      <div class="search"><input id="search" type="search" placeholder="Filter by name, id, version, source…" /></div>
+      <span id="meta" class="pill"></span>
+    </div>
+  </div>
+  <div class="card" id="diffCard" class="hidden">
+    <h3 style="margin-top:0">Differences</h3>
+    <div class="summary" id="diffSummary"></div>
+    <div id="diffTables"></div>
+  </div>
+  <div class="card" id="afterCard" class="hidden">
+    <h3 style="margin-top:0">After snapshot</h3>
+    <div id="afterTable"></div>
+  </div>
+  <div class="card" id="beforeCard" class="hidden">
+    <h3 style="margin-top:0">Before snapshot</h3>
+    <div id="beforeTable"></div>
+  </div>
+  <footer>
+    Tip: Open this file locally, then use the file pickers above to load your JSON snapshots.
+  </footer>
+  <script>
+  (function(){
+    const $ = (sel,el=document)=>el.querySelector(sel);
+    const $$ = (sel,el=document)=>Array.from(el.querySelectorAll(sel));
+    const beforeInput = $('#beforeFile');
+    const afterInput = $('#afterFile');
+    const parseBtn = $('#parseBtn');
+    const searchBox = $('#search');
+    const meta = $('#meta');
+    let beforeData = null;
+    let afterData = null;
+    let currentFilter = '';
+    function enableParseIfReady(){
+      parseBtn.disabled = !(beforeInput.files.length || afterInput.files.length);
+    }
+    beforeInput.addEventListener('change', enableParseIfReady);
+    afterInput.addEventListener('change', enableParseIfReady);
+    parseBtn.addEventListener('click', async () => {
+      beforeData = beforeInput.files.length ? await readJson(beforeInput.files[0]) : null;
+      afterData = afterInput.files.length ? await readJson(afterInput.files[0]) : null;
+      const beforePkgs = normalizePackages(beforeData);
+      const afterPkgs = normalizePackages(afterData);
+      $('#beforeCard').classList.toggle('hidden', !beforePkgs.length);
+      $('#afterCard').classList.toggle('hidden', !afterPkgs.length);
+      $('#diffCard').classList.toggle('hidden', !(beforePkgs.length && afterPkgs.length));
+      if (beforePkgs.length) renderTable('#beforeTable', beforePkgs, {title:'Before'});
+      if (afterPkgs.length) renderTable('#afterTable', afterPkgs, {title:'After'});
+      if (beforePkgs.length && afterPkgs.length) {
+        renderDiff(beforePkgs, afterPkgs);
+        meta.textContent = `${beforePkgs.length} → ${afterPkgs.length} packages`;
+      } else if (beforePkgs.length) {
+        meta.textContent = `${beforePkgs.length} packages (before only)`;
+      } else if (afterPkgs.length) {
+        meta.textContent = `${afterPkgs.length} packages (after only)`;
+      } else {
+        meta.textContent = '';
+      }
+    });
+    searchBox.addEventListener('input', () => {
+      currentFilter = searchBox.value.trim().toLowerCase();
+      $$('.data-table').forEach(applyFilter);
+    });
+    function readJson(file){
+      return new Promise((resolve,reject)=>{
+        const fr = new FileReader();
+        fr.onerror = () => reject(fr.error);
+        fr.onload = () => {
+          try {
+            const text = String(fr.result || '').trim();
+            const json = JSON.parse(text);
+            resolve(json);
+          } catch(e){ reject(new Error('Invalid JSON: '+ e.message)); }
+        };
+        fr.readAsText(file);
+      });
+    }
+    function normalizePackages(obj){
+      if (!obj) return [];
+      let raw = [];
+      if (Array.isArray(obj)) raw = obj;
+      else if (Array.isArray(obj.Packages)) raw = obj.Packages;
+      else if (Array.isArray(obj.apps)) raw = obj.apps;
+      const mapField = (pkg, a, b, c) => pkg?.[a] ?? pkg?.[b] ?? pkg?.[c] ?? '';
+      return raw.map(pkg=>({
+        id: mapField(pkg,'Id','PackageIdentifier','id'),
+        name: mapField(pkg,'Name','PackageName','name'),
+        version: String(mapField(pkg,'Version','version','installedVersion')||''),
+        source: mapField(pkg,'Source','source','Repository') || inferSource(obj) || '',
+      })).filter(p=>p.id);
+    }
+    function inferSource(root){
+      try {
+        const srcs = root?.Sources || root?.sources;
+        if (Array.isArray(srcs) && srcs.length){
+          const wing = srcs.find(s=>/winget/i.test(s.Name||s.name||''));
+          if (wing) return 'winget';
+          if (/store/i.test(JSON.stringify(srcs))) return 'msstore';
+        }
+      } catch {}
+      return '';
+    }
+    function renderTable(targetSel, data, opts={}){
+      const target = $(targetSel);
+      target.innerHTML = '';
+      const table = document.createElement('table');
+      table.className = 'data-table';
+      const thead = document.createElement('thead');
+      const headers = [
+        {key:'name', label:'Name'},
+        {key:'id', label:'Id'},
+        {key:'version', label:'Version'},
+        {key:'source', label:'Source'},
+      ];
+      let sortKey = 'name';
+      let sortDir = 1;
+      const trh = document.createElement('tr');
+      headers.forEach(h=>{
+        const th = document.createElement('th');
+        th.textContent = h.label;
+        const dir = document.createElement('span');
+        dir.className = 'dir';
+        th.appendChild(dir);
+        th.addEventListener('click', ()=>{
+          if (sortKey===h.key) sortDir*=-1; else { sortKey=h.key; sortDir=1; }
+          renderBody();
+          updateDirs();
+        });
+        trh.appendChild(th);
+      });
+      thead.appendChild(trh);
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      table.appendChild(tbody);
+      function updateDirs(){
+        $$('.dir', table).forEach(el=>el.textContent='');
+        const idx = headers.findIndex(h=>h.key===sortKey);
+        const t = $$('.dir', table)[idx];
+        if (t) t.textContent = sortDir>0 ? '▲' : '▼';
+      }
+      function renderBody(){
+        const filtered = data.filter(row => filterRow(row));
+        filtered.sort((a,b)=>{
+          const av = (a[sortKey]||'').toString().toLowerCase();
+          const bv = (b[sortKey]||'').toString().toLowerCase();
+          if (sortKey==='version') return compareVersion(av,bv)*sortDir;
+          if (av<bv) return -1*sortDir; if (av>bv) return 1*sortDir; return 0;
+        });
+        tbody.innerHTML='';
+        for (const r of filtered){
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${esc(r.name)}</td>
+            <td><code>${esc(r.id)}</code></td>
+            <td>${esc(r.version)}</td>
+            <td>${esc(r.source)}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      }
+      target.appendChild(table);
+      renderBody();
+      updateDirs();
+      applyFilter(table);
+    }
+    function renderDiff(before, after){
+      const byId = (arr)=>{
+        const m = new Map();
+        for (const p of arr) m.set(p.id, p);
+        return m;
+      };
+      const B = byId(before), A = byId(after);
+      const added=[], removed=[], updated=[];
+      for (const [id, pkg] of A){
+        if (!B.has(id)) added.push(pkg);
+      }
+      for (const [id, pkg] of B){
+        if (!A.has(id)) removed.push(pkg);
+        else {
+          const np = A.get(id);
+          if (normalizeVersion(pkg.version) !== normalizeVersion(np.version)){
+            updated.push({ id, name: np.name||pkg.name, from: pkg.version, to: np.version, source: np.source||pkg.source });
+          }
+        }
+      }
+      const summary = $('#diffSummary');
+      summary.innerHTML = '';
+      const mkpill = (label, cls)=>{ const s=document.createElement('span'); s.className='pill'; s.style.borderColor='var(--muted)'; s.innerHTML = `<span class="tag ${cls}">${cls}</span> ${label}`; return s; };
+      if (updated.length) summary.appendChild(mkpill(`${updated.length} updated`, 'update'));
+      if (added.length) summary.appendChild(mkpill(`${added.length} added`, 'add'));
+      if (removed.length) summary.appendChild(mkpill(`${removed.length} removed`, 'remove'));
+      if (!summary.childNodes.length) summary.textContent = 'No differences detected.';
+      const host = $('#diffTables');
+      host.innerHTML = '';
+      if (updated.length){ host.appendChild(buildTable('Updated packages', updated, ['name','id','from','to','source'], {
+        decorators:{ from:(v)=>`<span class="tag remove">${esc(v)}</span>`, to:(v)=>`<span class="tag add">${esc(v)}</span>` }
+      })); }
+      if (added.length){ host.appendChild(buildTable('Added packages', added, ['name','id','version','source'])); }
+      if (removed.length){ host.appendChild(buildTable('Removed packages', removed, ['name','id','version','source'])); }
+    }
+    function buildTable(title, rows, cols, opts={}){
+      const card = document.createElement('div');
+      card.style.marginTop = '12px';
+      const h = document.createElement('h4');
+      h.textContent = title;
+      h.style.margin = '6px 0 10px';
+      card.appendChild(h);
+      const container = document.createElement('div');
+      card.appendChild(container);
+      const normalized = rows.map(r=>({
+        name: r.name ?? r.Name ?? '',
+        id: r.id ?? r.Id ?? r.PackageIdentifier ?? '',
+        version: r.version ?? r.Version ?? '',
+        source: r.source ?? r.Source ?? '',
+        from: r.from ?? '',
+        to: r.to ?? '',
+      }));
+      renderTable(container, normalized, cols, opts);
+      return card;
+    }
+    function renderTable(container, rows, cols, opts={}){
+      if (typeof container === 'string') container = $(container);
+      container.innerHTML = '';
+      const table = document.createElement('table'); table.className='data-table';
+      const thead = document.createElement('thead'); const trh = document.createElement('tr');
+      let sortKey = cols[0]; let sortDir = 1; const decorators = opts.decorators||{};
+      for (const c of cols){ const th=document.createElement('th'); th.textContent = titleCase(c); const dir=document.createElement('span'); dir.className='dir'; th.appendChild(dir); th.addEventListener('click',()=>{ if(sortKey===c) sortDir*=-1; else {sortKey=c;sortDir=1;} renderBody(); updateDir(); }); trh.appendChild(th); }
+      thead.appendChild(trh); table.appendChild(thead);
+      const tbody=document.createElement('tbody'); table.appendChild(tbody); container.appendChild(table);
+      function updateDir(){ $$('.dir',table).forEach(e=>e.textContent=''); const idx=cols.indexOf(sortKey); const node=$$('.dir',table)[idx]; if(node) node.textContent = sortDir>0?'▲':'▼'; }
+      function renderBody(){ const filtered = rows.filter(r=>filterRow(r)); filtered.sort((a,b)=>{ const av=(a[sortKey]||'').toString().toLowerCase(); const bv=(b[sortKey]||'').toString().toLowerCase(); if (sortKey==='version'||sortKey==='from'||sortKey==='to') return compareVersion(av,bv)*sortDir; if(av<bv) return -1*sortDir; if(av>bv) return 1*sortDir; return 0;}); tbody.innerHTML=''; for(const r of filtered){ const tr=document.createElement('tr'); const cells = cols.map(c=>{ const v = r[c] ?? ''; const deco = decorators[c]; const out = deco ? deco(v) : esc(v); return `<td>${out}</td>`; }).join(''); tr.innerHTML = cells; tbody.appendChild(tr);} }
+      renderBody(); updateDir(); applyFilter(table);
+    }
+    function titleCase(s){ return String(s||'').replace(/(^|_|-|\s)([a-z])/g,(m,sep,ch)=> (sep? ' ':'')+ch.toUpperCase()); }
+    function esc(s){ return String(s ?? '').replace(/[&<>\"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\\':'\\'})[c]); }
+    function compareVersion(a,b){
+      const pa = normalizeVersion(a).split(/[^0-9a-zA-Z]+/).filter(Boolean);
+      const pb = normalizeVersion(b).split(/[^0-9a-zA-Z]+/).filter(Boolean);
+      const len = Math.max(pa.length, pb.length);
+      for (let i=0;i<len;i++){
+        const av = pa[i] ?? '0'; const bv = pb[i] ?? '0';
+        const an = Number(av), bn = Number(bv);
+        const aNum = !Number.isNaN(an) && /^\d+$/.test(av);
+        const bNum = !Number.isNaN(bn) && /^\d+$/.test(bv);
+        if (aNum && bNum){ if (an !== bn) return an < bn ? -1 : 1; }
+        else { if (av !== bv) return av < bv ? -1 : 1; }
+      }
+      return 0;
+    }
+    function normalizeVersion(v){ return String(v||'').trim().replace(/^v/i,''); }
+    function filterRow(row){
+      if (!currentFilter) return true;
+      const s = (row.name+' '+row.id+' '+(row.version||'')+' '+(row.source||'')).toLowerCase();
+      return s.includes(currentFilter);
+    }
+    function applyFilter(table){
+      const rows = $$('tbody tr', table);
+      let shown = 0;
+      for (const tr of rows){
+        const t = tr.textContent.toLowerCase();
+        const keep = !currentFilter || t.includes(currentFilter);
+        tr.style.display = keep ? '' : 'none';
+        if (keep) shown++;
+      }
+    }
+  })();
+  </script>
+</body>
+</html>
+'@
+        Set-Content -LiteralPath $viewerDst -Value $viewerHtml -Encoding UTF8 -ErrorAction Stop
+        Write-Host "[viewer] Created PackagesViewer.html at $viewerDst"
     }
 } catch {
-    Write-Warning "Could not copy PackagesViewer.html: $($_.Exception.Message)"
+    Write-Warning "Could not copy or create PackagesViewer.html: $($_.Exception.Message)"
 }
 
 # Planned package export path (post-upgrade snapshot)
@@ -450,9 +782,9 @@ try {
 
     # Export pre-upgrade package snapshot
     try {
-        & "$Winget" export --output "$pkgPreExportPath" --include-versions
+        & "$Winget" export --output "$pkgPreExportPath" --include-versions --include-unknown
     } catch {
-        try { & "$Winget" export -o "$pkgPreExportPath" --include-versions } catch { Write-Warning "Pre-upgrade export failed: $($_.Exception.Message)" }
+        try { & "$Winget" export -o "$pkgPreExportPath" --include-versions --include-unknown } catch { Write-Warning "Pre-upgrade export failed: $($_.Exception.Message)" }
     }
     if (Test-Path $pkgPreExportPath) { Write-Host "[packages-before] Exported to $pkgPreExportPath" }
 
@@ -461,11 +793,11 @@ try {
 
     # Export package snapshot (after upgrade)
     try {
-        & "$Winget" export --output "$pkgExportPath" --include-versions
+        & "$Winget" export --output "$pkgExportPath" --include-versions --include-unknown
     } catch {
         # Fallback for older winget using -o
         try {
-            & "$Winget" export -o "$pkgExportPath" --include-versions
+            & "$Winget" export -o "$pkgExportPath" --include-versions --include-unknown
         } catch {
             Write-Warning "Package export failed: $($_.Exception.Message)"
         }
