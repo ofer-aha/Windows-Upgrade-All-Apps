@@ -170,7 +170,11 @@ function Start-SelfElevated {
     [string[]]$PassThruArgs = @()
   )
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = 'powershell.exe'
+
+  $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source
+  $ps51 = (Get-Command powershell -ErrorAction SilentlyContinue)?.Source
+  $psi.FileName = if ($pwsh) { $pwsh } elseif ($ps51) { $ps51 } else { 'powershell.exe' }
+
   $psi.Arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File', ('"{0}"' -f $PSCommandPath)) + $PassThruArgs | ForEach-Object { $_ } |  
     ForEach-Object { $_ } |  
     ForEach-Object { $_ } |  
